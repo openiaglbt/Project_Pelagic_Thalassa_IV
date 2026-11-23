@@ -1,0 +1,16 @@
+# macOS / éditeurs
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# Journaux et archives locales
+*.log
+*.zip
+
+# Dépendances éventuelles
+node_modules/
+
+# Captures QA brutes uniquement à la racine (les images du README sont dans docs/screenshots)
+/screenshots/
