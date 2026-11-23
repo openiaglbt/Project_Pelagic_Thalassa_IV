@@ -640,6 +640,14 @@ PP.Factory = (function () {
             state.powerConsumed = consumed;
             state.powerEfficiency = consumed <= 0 ? 1 : Math.min(1, produced / consumed);
             state.powerReserve = produced - consumed;
+            const deficit = consumed > produced;
+            if (deficit !== !!state.powerWarning) {
+                state.powerWarning = deficit;
+                if (state.isPlaying) {
+                    if (deficit) notify('RÉSEAU SOUS-ALIMENTÉ', `Demande ${consumed} MW pour ${produced} MW produits. Réduisez la charge ou ajoutez une prise géothermique.`, 'warn');
+                    else notify('RÉSEAU STABLE', `Production ${produced} MW pour ${consumed} MW consommés.`, 'success');
+                }
+            }
         }
 
         api.recalcPower = recalcPower;
@@ -706,9 +714,25 @@ PP.Factory = (function () {
                     }
                 });
             }
-            // Récupération des matériaux (80%)
-            Object.entries(b.mesh.userData.cost || D.BUILDINGS[b.type].cost).forEach(([key, value]) => {
-                state.inventory[key] = (state.inventory[key] || 0) + Math.ceil(value * 0.8);
+            // Récupération des matériaux (80 %), améliorations comprises :
+            // démonter un module Mk.II ne doit pas faire disparaître le surcoût
+            // de recherche et de construction déjà payé par le joueur.
+            const def = D.BUILDINGS[b.type];
+            const refund = {};
+            const addRefund = (key, value) => {
+                if (!D.RESOURCES[key] || !Number.isFinite(value) || value <= 0) return;
+                refund[key] = (refund[key] || 0) + Math.ceil(value * 0.8);
+            };
+            Object.entries(b.mesh.userData.cost || (def && def.cost) || {}).forEach(([key, value]) => addRefund(key, value));
+            const level = Math.max(1, Math.min(3, b.level || 1));
+            for (let l = 1; l < level; l++) {
+                Object.entries((def && def.cost) || {}).forEach(([key, value]) => {
+                    addRefund(key, Math.max(1, Math.round(value * 0.9 * l)));
+                });
+                if (l >= 2) addRefund('thermicAlloy', 2);
+            }
+            Object.entries(refund).forEach(([key, value]) => {
+                state.inventory[key] = (state.inventory[key] || 0) + value;
             });
             // Libère les nœuds et évents
             if (Number.isInteger(b.linkedNodeId) && world.nodes[b.linkedNodeId]) world.nodes[b.linkedNodeId].occupied = false;
@@ -1037,30 +1061,53 @@ PP.Factory = (function () {
 
         api.restore = function (records) {
             if (!Array.isArray(records)) return;
+            const cleanBuffer = raw => {
+                const out = {};
+                if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+                Object.entries(raw).slice(0, 12).forEach(([key, value]) => {
+                    if (D.RESOURCES[key] && Number.isFinite(value) && value > 0) out[key] = Math.min(9999, Math.floor(value));
+                });
+                return out;
+            };
+            const usedIds = new Set(state.buildings.map(b => b.id));
             records.slice(0, 160).forEach(rec => {
+                if (!rec || typeof rec !== 'object') return;
                 const def = D.BUILDINGS[rec.type];
-                if (!def || !Array.isArray(rec.pos)) return;
+                if (!def || !Array.isArray(rec.pos) || rec.pos.length !== 3 || !rec.pos.every(Number.isFinite)) return;
+                const pos = new THREE.Vector3(
+                    U.clamp(rec.pos[0], -D.WORLD.HALF + 12, D.WORLD.HALF - 12),
+                    U.clamp(rec.pos[1], -D.WORLD.MAX_DEPTH / D.WORLD.DEPTH_SCALE - 20, D.WORLD.WATER_Y + 30),
+                    U.clamp(rec.pos[2], -D.WORLD.HALF + 12, D.WORLD.HALF - 12)
+                );
                 const mesh = createMesh(rec.type);
-                const pos = new THREE.Vector3(rec.pos[0], rec.pos[1], rec.pos[2]);
                 mesh.position.copy(pos);
                 mesh.rotation.y = Number.isFinite(rec.rot) ? rec.rot : 0;
                 scene.add(mesh);
-                const id = Number.isInteger(rec.id) ? rec.id : state.nextBuildingId++;
+                let id;
+                if (Number.isInteger(rec.id) && rec.id > 0 && !usedIds.has(rec.id)) id = rec.id;
+                else {
+                    while (usedIds.has(state.nextBuildingId)) state.nextBuildingId++;
+                    id = state.nextBuildingId++;
+                }
+                usedIds.add(id);
+                const linkedNodeId = Number.isInteger(rec.linkedNodeId) && world.nodes[rec.linkedNodeId] && !world.nodes[rec.linkedNodeId].occupied ? rec.linkedNodeId : null;
+                const linkedVentId = Number.isInteger(rec.linkedVentId) && world.vents[rec.linkedVentId] && !world.vents[rec.linkedVentId].occupied ? rec.linkedVentId : null;
                 const b = {
-                    id, kind: 'building', type: rec.type, name: rec.name || def.name,
+                    id, kind: 'building', type: rec.type,
+                    name: typeof rec.name === 'string' ? rec.name.slice(0, 64) : def.name,
                     position: pos, mesh,
                     power: Number.isFinite(rec.power) ? rec.power : def.power,
                     level: Math.max(1, Math.min(3, Number.isInteger(rec.level) ? rec.level : 1)),
-                    inputBuffer: rec.inputBuffer || {},
-                    outputBuffer: rec.outputBuffer || {},
-                    recipe: rec.recipe || (def.type === 'smelter' ? 'titaniumIngot' : null),
-                    progress: Number.isFinite(rec.progress) ? rec.progress : 0,
-                    linkedNodeId: Number.isInteger(rec.linkedNodeId) ? rec.linkedNodeId : null,
-                    linkedVentId: Number.isInteger(rec.linkedVentId) ? rec.linkedVentId : null,
+                    inputBuffer: cleanBuffer(rec.inputBuffer),
+                    outputBuffer: cleanBuffer(rec.outputBuffer),
+                    recipe: D.SMELTER_RECIPES[rec.recipe] ? rec.recipe : (def.type === 'smelter' ? 'titaniumIngot' : null),
+                    progress: U.clamp(Number.isFinite(rec.progress) ? rec.progress : 0, 0, 120),
+                    linkedNodeId,
+                    linkedVentId,
                     depleted: false, scanTimer: 0
                 };
-                if (Number.isInteger(b.linkedNodeId) && world.nodes[b.linkedNodeId]) world.nodes[b.linkedNodeId].occupied = true;
-                if (Number.isInteger(b.linkedVentId) && world.vents[b.linkedVentId]) world.vents[b.linkedVentId].occupied = true;
+                if (linkedNodeId !== null) world.nodes[linkedNodeId].occupied = true;
+                if (linkedVentId !== null) world.vents[linkedVentId].occupied = true;
                 mesh.traverse(c => { if (c.isMesh) c.userData.entity = b; });
                 applyLevelVisual(b);
                 state.buildings.push(b);
@@ -1074,6 +1121,7 @@ PP.Factory = (function () {
         api.restorePipes = function (records) {
             if (!Array.isArray(records)) return;
             records.slice(0, 200).forEach(rec => {
+                if (!rec || typeof rec !== 'object') return;
                 const from = state.buildings.find(b => b.id === rec.fromId);
                 const to = state.buildings.find(b => b.id === rec.toId);
                 if (!from || !to) return;

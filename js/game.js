@@ -11,6 +11,8 @@ PP.Game = (function () {
     const U = D.UTILS;
     const W = D.WORLD;
     const SAVE_KEY = 'pelagic_thalassa_save_v4';
+    const SAVE_BACKUP_KEY = SAVE_KEY + '_backup';
+    const SAVE_VERSION = 4;
     const SETTINGS_KEY = 'pelagic_thalassa_settings_v3';
 
     const canvas = document.getElementById('game-canvas');
@@ -59,7 +61,7 @@ PP.Game = (function () {
         surgeTimer: 0, surgeCooldown: 0, silenceTimer: 0, silenceCooldown: 0,
         ascentCooldown: 0, autoScan: false, autoScanTimer: 0,
         breach: { active: false, timer: 0 },
-        photoFilter: 0, lastBuildType: 'hub', currentInfo: { x: 0, z: 0, speed: 0 },
+        photoFilter: 0, lastBuildType: null, currentInfo: { x: 0, z: 0, speed: 0 },
         hullResist: 0, stealthFactor: 1, moveSpeed: 24,
         photoMode: false, depthHold: false, heldDepth: 0,
         emergencyO2Used: false, fieldRepairCooldown: 0, recallCooldown: 0,
@@ -74,7 +76,7 @@ PP.Game = (function () {
         settings: { ...D.DEFAULT_SETTINGS },
         maxO2: 100, o2: 100, hull: 100, maxCrushDepth: 320,
         acousticStealth: false,
-        powerProduced: 0, powerConsumed: 0, powerEfficiency: 1, powerReserve: 0,
+        powerProduced: 0, powerConsumed: 0, powerEfficiency: 1, powerReserve: 0, powerWarning: false,
         buildings: [], pipes: [], drones: [],
         nextBuildingId: 2,
         waypoint: null,
@@ -470,11 +472,26 @@ PP.Game = (function () {
     }
 
     function emergencyRecall() {
-        state.o2 = state.maxO2;
-        state.hull = 100;
+        // Le sauvetage automatique n'est pas une téléportation gratuite :
+        // une partie du fret brut est perdue et la capsule revient en état
+        // dégradé. Le joueur conserve sa progression, pas son butin complet.
+        let lost = 0;
+        D.RESOURCE_ORDER.forEach(key => {
+            const info = D.RESOURCES[key];
+            if (!info || info.tier !== 'raw') return;
+            const qty = Math.floor((state.inventory[key] || 0) * 0.25);
+            if (qty > 0) {
+                state.inventory[key] = Math.max(0, (state.inventory[key] || 0) - qty);
+                lost += qty;
+            }
+        });
+        state.o2 = Math.min(state.maxO2, Math.max(45, Math.round(state.maxO2 * 0.55)));
+        state.hull = 65;
         state.tethered = false;
-        world.weaver.tethered = false;
-        world.silkLine.visible = false;
+        state.depthHold = false;
+        if (state.breach) state.breach.active = false;
+        if (world.weaver) world.weaver.tethered = false;
+        if (world.silkLine) world.silkLine.visible = false;
         document.getElementById('tether-warning').classList.remove('show');
         document.getElementById('damage-overlay').style.opacity = '0';
         const hub = state.buildings.find(b => b.type === 'hub');
@@ -484,7 +501,7 @@ PP.Game = (function () {
         lookEuler.setFromQuaternion(camera.quaternion);
         velocity.set(0, 0, 0);
         PP.Audio.alarm();
-        toast('Rupture critique : rapatriement d\'urgence à la capsule. Intégrité restaurée.', 'danger', 'SURVIE');
+        toast(`Rupture critique : rapatriement d'urgence. Coque à 65 %, O₂ de secours. ${lost > 0 ? `${lost} unités de fret brut perdues.` : 'Fret brut déjà vide.'}`, 'danger', 'SURVIE');
         saveGame(false);
     }
 
@@ -622,6 +639,9 @@ PP.Game = (function () {
         }
         state.surgeTimer = 30;
         state.surgeCooldown = 120;
+        // Sans recalcul immédiat, la surcharge n'aurait aucun effet sur le
+        // réseau tant qu'aucun module ne serait construit ou amélioré.
+        if (factory) factory.recalcPower();
         PP.Audio.levelUp();
         toast('SURCHARGE : production électrique +50 % pendant 30 s. Les modules accélèrent.', 'success', 'PROTOCOLE');
         updateHUDNow();
@@ -660,6 +680,7 @@ PP.Game = (function () {
         const targetY = W.WATER_Y - 38 / W.DEPTH_SCALE;
         camera.position.y = Math.max(targetY, world.height(camera.position.x, camera.position.z) + 2.2);
         velocity.y = 0;
+        state.depthHold = false;
         state.ascentCooldown = 130;
         PP.Audio.alarm();
         toast('REMONTÉE D\'URGENCE : palier sûr atteint. 18 s d\'O₂ consommées.', 'success', 'PROTOCOLE');
@@ -763,8 +784,8 @@ PP.Game = (function () {
 
     function repeatLastBuild() {
         if (!state.lastBuildType) return false;
-        const def = D.BUILDINGS[D.lastBuildType];
-        if (!def) return false;
+        const def = D.BUILDINGS[state.lastBuildType];
+        if (!def || def.type === 'hub') return false;
         if (def.tech && !state.unlockedTechs[def.tech]) {
             toast('Technologie requise pour reconstruire ce module.', 'warn', 'CONSTRUCTION');
             return false;
@@ -890,11 +911,20 @@ PP.Game = (function () {
     }
 
     function togglePhotoMode() {
-        state.photoMode = !state.photoMode;
+        const entering = !state.photoMode;
+        state.photoMode = entering;
+        if (entering) {
+            // Le mode photo doit rendre le pilotage immédiatement disponible,
+            // même lorsqu'il est lancé depuis le menu pause. Sinon la caméra
+            // resterait figée derrière un panneau fermé.
+            state.isPaused = false;
+            clearPressedKeys();
+            if (PP.UI && PP.UI.closeAllModals) PP.UI.closeAllModals();
+        }
         document.body.classList.toggle('photo-mode', state.photoMode);
         applyPhotoFilter();
-        if (state.photoMode) {
-            document.exitPointerLock();
+        if (entering) {
+            if (document.pointerLockElement) document.exitPointerLock();
             toast('Mode photo : HUD masqué. F2 pour revenir à la sonde.', 'info', 'PHOTO');
         } else {
             toast('Mode photo désactivé.', 'info', 'PHOTO');
@@ -927,14 +957,21 @@ PP.Game = (function () {
 
     function importSave(text) {
         try {
+            if (typeof text !== 'string' || text.length > 8 * 1024 * 1024) throw new Error('fichier trop volumineux');
             const parsed = JSON.parse(text);
-            if (!parsed || typeof parsed !== 'object' || !parsed.inventory || typeof parsed.inventory !== 'object') {
-                throw new Error('format invalide');
+            if (!isValidSavePayload(parsed)) throw new Error('format invalide');
+            const previous = localStorage.getItem(SAVE_KEY);
+            if (previous) {
+                try {
+                    if (isValidSavePayload(JSON.parse(previous))) localStorage.setItem(SAVE_BACKUP_KEY, previous);
+                } catch (backupError) { /* ne pas écraser le secours avec une save illisible */ }
             }
             localStorage.setItem(SAVE_KEY, JSON.stringify(parsed));
             return true;
         } catch (error) {
-            console.error('Import impossible', error);
+            // Un fichier invalide est une erreur de saisie attendue :
+            // on la signale sans polluer la console comme une panne.
+            console.warn('Import refusé :', error && error.message ? error.message : error);
             return false;
         }
     }
@@ -961,7 +998,13 @@ PP.Game = (function () {
         state.surgeCooldown = Math.max(0, (state.surgeCooldown || 0) - dt);
         state.silenceCooldown = Math.max(0, (state.silenceCooldown || 0) - dt);
         state.ascentCooldown = Math.max(0, (state.ascentCooldown || 0) - dt);
-        if (state.surgeTimer > 0) state.surgeTimer = Math.max(0, state.surgeTimer - dt);
+        if (state.surgeTimer > 0) {
+            state.surgeTimer = Math.max(0, state.surgeTimer - dt);
+            if (state.surgeTimer === 0) {
+                if (factory) factory.recalcPower();
+                toast('Surcharge réseau terminée : production nominale rétablie.', 'info', 'ÉNERGIE');
+            }
+        }
         if (state.silenceTimer > 0) {
             state.silenceTimer = Math.max(0, state.silenceTimer - dt);
             state.stealthFactor = Math.min(state.stealthFactor || 1, 0.34);
@@ -1246,10 +1289,10 @@ PP.Game = (function () {
                 return;
             }
             if (e.code === 'F5') {
-                saveGame(true);
+                const saved = saveGame(true);
                 if (PP.UI.isOpen('modal-pause')) {
                     const fb = document.getElementById('pause-feedback');
-                    if (fb) fb.textContent = '✓ Sauvegarde rapide enregistrée.';
+                    if (fb) fb.textContent = saved ? '✓ Sauvegarde rapide enregistrée.' : '✕ Échec de la sauvegarde rapide.';
                     PP.UI.refreshPauseStats && PP.UI.refreshPauseStats();
                 }
                 return;
@@ -1533,6 +1576,7 @@ PP.Game = (function () {
             addXp(35);
             state.stats.regionsFound = Object.keys(state.visitedRegions).length;
             updateHUDNow();
+            saveGame(false);
             return;
         }
 
@@ -1552,7 +1596,7 @@ PP.Game = (function () {
                     return;
                 }
                 const result = factory.connect(state.pipeSource, hoveredEntity);
-                if (result.ok) addXp(20);
+                if (result.ok) { addXp(20); saveGame(false); }
                 else toast(result.reason, 'warn', 'LOGISTIQUE');
                 state.pipeSource = null;
             }
@@ -1710,6 +1754,17 @@ PP.Game = (function () {
             saveGame(false);
         }
 
+        // Secret photographique : l'efflorescence de la canopée ne se révèle
+        // qu'en mode photo. Elle donne un souffle d'oxygène et une archive.
+        if (!state.codex['phenomenon-biolum'] && state.photoMode && region.id === 'kelp' && world.depthOf(camera.position.y) < 320) {
+            unlockCodex('phenomenon-biolum', true);
+            state.o2 = Math.min(state.maxO2, state.o2 + 12);
+            PP.Audio.relic();
+            toast('Efflorescence bioluminescente capturée : +12 s O₂, archive ajoutée au codex.', 'xeno', 'PHOTO');
+            updateHUDNow();
+            saveGame(false);
+        }
+
         const nearPoi = world.nearestPoi(camera.position);
         if (nearPoi.poi && nearPoi.distance < 34 && !state.discoveredPois[nearPoi.poi.id]) {
             discoverPoi(nearPoi.poi);
@@ -1762,6 +1817,7 @@ PP.Game = (function () {
         PP.Audio.pickup();
         toast(`${poi.name} · archive et ressources récupérées.`, 'success', 'DÉCOUVERTE');
         PP.UI.updateMenu();
+        saveGame(false);
     }
 
     function collectRelic(relic) {
@@ -2259,6 +2315,35 @@ PP.Game = (function () {
         updateHUDNow();
     }
 
+    function trackMission(id) {
+        const mission = D.MAIN_MISSIONS.find(m => m.id === id);
+        const target = mission && mission.target;
+        if (!mission || !target) {
+            toast('Aucun repère cartographique disponible pour cet objectif.', 'info', 'MISSION');
+            return false;
+        }
+        let x = 0, z = 0;
+        let label = target.label || mission.name;
+        if (target.region && D.REGION_BY_ID[target.region]) {
+            x = D.REGION_BY_ID[target.region].center[0];
+            z = D.REGION_BY_ID[target.region].center[1];
+        } else if (target.poi && D.POI_BY_ID[target.poi]) {
+            x = D.POI_BY_ID[target.poi].x;
+            z = D.POI_BY_ID[target.poi].z;
+        } else if (target.hub) {
+            const hub = state.buildings.find(b => b.type === 'hub');
+            if (hub) { x = hub.position.x; z = hub.position.z; }
+        } else {
+            toast('Aucun repère cartographique disponible pour cet objectif.', 'info', 'MISSION');
+            return false;
+        }
+        setWaypoint(x, z, label);
+        saveGame(false);
+        PP.Audio.pickup();
+        toast(`Objectif suivi : ${label}. La balise est tracée sur la carte et la boussole.`, 'success', 'MISSION');
+        return true;
+    }
+
     function machineAction(action, b) {
         if (!b) return;
         if (action === 'repair') {
@@ -2362,6 +2447,7 @@ PP.Game = (function () {
         factory.dismantle(b);
         addXp(8);
         updateHUDNow();
+        saveGame(false);
     }
 
     function activateBeacon() {
@@ -2416,7 +2502,8 @@ PP.Game = (function () {
     function applyTechEffects() {
         const buffs = state.relicBuffs || {};
         state.maxO2 = (state.unlockedTechs.o2Mk1 ? 160 : 100) + (buffs.o2 || 0);
-        state.o2 = Math.min(state.maxO2, Math.max(0, state.o2 || state.maxO2));
+        const currentO2 = Number.isFinite(state.o2) ? state.o2 : state.maxO2;
+        state.o2 = Math.min(state.maxO2, Math.max(0, currentO2));
         state.maxCrushDepth = state.unlockedTechs.hullMk4 ? 3200
             : state.unlockedTechs.hullMk3 ? 1900
             : state.unlockedTechs.hullMk2 ? 950 : 320;
@@ -2552,13 +2639,14 @@ PP.Game = (function () {
 
     function updateMenuLabel() {
         if (state.gameWon) PP.UI.setPlayLabel('⌁ Continuer l\'exploration');
-        else if (state.loadedSave || state.stats.mine > 0 || state.stats.mined > 0 || state.stats.buildCount > 0) PP.UI.setPlayLabel('⌁ Reprendre l\'expédition');
+        else if (state.loadedSave || state.stats.mined > 0 || state.stats.buildCount > 0) PP.UI.setPlayLabel('⌁ Reprendre l\'expédition');
         else PP.UI.setPlayLabel('⌁ Plonger sur Thalassa-IV');
     }
 
     function resetGame() {
         try {
             localStorage.removeItem(SAVE_KEY);
+            localStorage.removeItem(SAVE_BACKUP_KEY);
         } catch (error) { /* ignore */ }
         location.reload();
     }
@@ -2605,7 +2693,7 @@ PP.Game = (function () {
     /* ------------------------------------------------------------------ */
     function serialize() {
         return {
-            version: 4,
+            version: SAVE_VERSION,
             savedAt: new Date().toISOString(),
             inventory: { ...state.inventory },
             unlockedTechs: Object.keys(state.unlockedTechs),
@@ -2650,6 +2738,12 @@ PP.Game = (function () {
     function saveGame(showFeedback = false) {
         if (!world) return false;
         try {
+            const previous = localStorage.getItem(SAVE_KEY);
+            if (previous) {
+                try {
+                    if (isValidSavePayload(JSON.parse(previous))) localStorage.setItem(SAVE_BACKUP_KEY, previous);
+                } catch (backupError) { /* la sauvegarde précédente est illisible : ne pas écraser le secours */ }
+            }
             localStorage.setItem(SAVE_KEY, JSON.stringify(serialize()));
             state.loadedSave = true;
             if (showFeedback) toast('Sauvegarde complète enregistrée.', 'success', 'SYSTÈME');
@@ -2664,19 +2758,46 @@ PP.Game = (function () {
     }
 
     function saveExists() {
-        try { return !!localStorage.getItem(SAVE_KEY); }
+        try { return !!(localStorage.getItem(SAVE_KEY) || localStorage.getItem(SAVE_BACKUP_KEY)); }
         catch (error) { return false; }
     }
 
+    function isValidSavePayload(saved) {
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return false;
+        if (!saved.inventory || typeof saved.inventory !== 'object' || Array.isArray(saved.inventory)) return false;
+        if (saved.version !== undefined) {
+            const version = Number(saved.version);
+            if (!Number.isFinite(version) || version < 1 || version > SAVE_VERSION) return false;
+        }
+        return true;
+    }
+
     function loadGame() {
-        let raw;
-        try { raw = localStorage.getItem(SAVE_KEY); }
-        catch (error) { return false; }
+        let raw, usedBackup = false;
+        try {
+            raw = localStorage.getItem(SAVE_KEY);
+            if (!raw) {
+                raw = localStorage.getItem(SAVE_BACKUP_KEY);
+                usedBackup = !!raw;
+            }
+        } catch (error) { return false; }
         if (!raw) return false;
         try {
-            const saved = JSON.parse(raw);
-            if (!saved || typeof saved !== 'object' || !Array.isArray(saved.inventory ? Object.keys(saved.inventory) : null)) {
-                // vérification simple ; le test réel suit
+            let saved;
+            try { saved = JSON.parse(raw); }
+            catch (parseError) {
+                const backup = localStorage.getItem(SAVE_BACKUP_KEY);
+                if (!backup || backup === raw) throw parseError;
+                saved = JSON.parse(backup);
+                usedBackup = true;
+            }
+            if (!isValidSavePayload(saved)) {
+                const backup = localStorage.getItem(SAVE_BACKUP_KEY);
+                if (!backup || backup === raw) throw new Error('format de sauvegarde invalide');
+                const backupSaved = JSON.parse(backup);
+                if (!isValidSavePayload(backupSaved)) throw new Error('format de sauvegarde invalide');
+                saved = backupSaved;
+                usedBackup = true;
             }
             if (saved.inventory && typeof saved.inventory === 'object') {
                 Object.keys(state.inventory).forEach(key => {
@@ -2710,9 +2831,28 @@ PP.Game = (function () {
                 });
             }
             if (Array.isArray(saved.contracts)) {
-                state.contracts = saved.contracts.filter(c => c && D.RESOURCES[c.key] && Number.isFinite(c.qty) && c.qty > 0 && c.reward && typeof c.reward === 'object');
+                const usedContractIds = new Set();
+                state.contracts = saved.contracts.filter(c => c && D.RESOURCES[c.key] && Number.isFinite(c.qty) && c.qty > 0 && c.reward && typeof c.reward === 'object').slice(0, 3).map(c => {
+                    let id = typeof c.id === 'string' && /^ct\d+$/.test(c.id) && !usedContractIds.has(c.id) ? c.id : 'ct' + (state.nextContractId++);
+                    usedContractIds.add(id);
+                    const reward = {};
+                    Object.entries(c.reward).slice(0, 8).forEach(([key, value]) => {
+                        if (D.RESOURCES[key] && Number.isFinite(value) && value > 0) reward[key] = Math.min(9999, Math.floor(value));
+                    });
+                    return {
+                        id,
+                        key: c.key,
+                        qty: U.clamp(Math.floor(c.qty), 1, 9999),
+                        name: typeof c.name === 'string' ? c.name.slice(0, 60) : D.RESOURCES[c.key].name,
+                        client: typeof c.client === 'string' ? c.client.slice(0, 60) : 'Colonie',
+                        tier: U.clamp(Number.isInteger(c.tier) ? c.tier : 0, 0, 3),
+                        reward,
+                        xp: U.clamp(Math.floor(Number(c.xp) || 120), 0, 9999)
+                    };
+                }).filter(c => Object.keys(c.reward).length > 0);
             }
             if (Number.isFinite(saved.nextContractId)) state.nextContractId = Math.max(1, Math.min(100000, Math.floor(saved.nextContractId)));
+            state.nextContractId = Math.max(state.nextContractId, ...state.contracts.map(c => (Number(c.id.replace(/^ct/, '')) || 0) + 1), 1);
             if (saved.stats && typeof saved.stats === 'object') {
                 Object.keys(state.stats).forEach(key => {
                     if (Number.isFinite(saved.stats[key]) && saved.stats[key] >= 0) state.stats[key] = saved.stats[key];
@@ -2728,7 +2868,11 @@ PP.Game = (function () {
             if (DIFFICULTIES[saved.difficulty]) state.difficulty = saved.difficulty;
             if (Array.isArray(saved.mapMarkers)) {
                 state.mapMarkers = saved.mapMarkers.filter(m => m && Number.isFinite(m.x) && Number.isFinite(m.z)).slice(0, 8)
-                    .map(m => ({ x: m.x, z: m.z, label: typeof m.label === 'string' ? m.label.slice(0, 42) : 'Marqueur' }));
+                    .map(m => ({
+                        x: U.clamp(m.x, -W.HALF, W.HALF),
+                        z: U.clamp(m.z, -W.HALF, W.HALF),
+                        label: typeof m.label === 'string' ? m.label.slice(0, 42) : 'Marqueur'
+                    }));
             }
             if (saved.regionCells && typeof saved.regionCells === 'object') {
                 state.regionCells = {};
@@ -2750,17 +2894,19 @@ PP.Game = (function () {
             if (Number.isFinite(saved.photoFilter)) state.photoFilter = U.clamp(saved.photoFilter, 0, 3);
             if (typeof saved.lastBuildType === 'string' && D.BUILDINGS[saved.lastBuildType]) state.lastBuildType = saved.lastBuildType;
             if (saved.breach && typeof saved.breach === 'object') state.breach = { active: !!saved.breach.active, timer: 0 };
-            if (Number.isFinite(saved.o2)) state.o2 = U.clamp(saved.o2, 0, 160);
+            if (Number.isFinite(saved.o2)) state.o2 = U.clamp(saved.o2, 0, 10000);
             if (Number.isFinite(saved.hull)) state.hull = U.clamp(saved.hull, 0, 100);
             if (Number.isFinite(saved.nextBuildingId)) state.nextBuildingId = Math.max(2, Math.min(10000, saved.nextBuildingId));
             if (saved.waypoint && Number.isFinite(saved.waypoint.x) && Number.isFinite(saved.waypoint.z)) {
                 state.waypoint = {
                     x: saved.waypoint.x, z: saved.waypoint.z,
-                    label: typeof saved.waypoint.label === 'string' ? saved.waypoint.label : 'Balise'
+                    label: typeof saved.waypoint.label === 'string' ? saved.waypoint.label.slice(0, 60) : 'Balise'
                 };
             }
             state.gameWon = saved.gameWon === true;
             state.stats.won = state.gameWon ? 1 : state.stats.won;
+            state.stats.regionsFound = Object.keys(state.visitedRegions).length;
+            state.stats.poiFound = Object.keys(state.discoveredPois).length;
             state.stats.relicsFound = Object.keys(state.relics).length;
             applyRelicEffects();
             if (world.applyRelicState) world.applyRelicState(state.relics);
@@ -2787,13 +2933,17 @@ PP.Game = (function () {
                 factory.restore(saved.buildings || []);
                 factory.restorePipes(saved.pipes || []);
             }
-            if (saved.player && Array.isArray(saved.player.pos) && saved.player.pos.length === 3) {
+            if (saved.player && Array.isArray(saved.player.pos) && saved.player.pos.length === 3 && saved.player.pos.every(Number.isFinite)) {
                 state.resumeCamera = {
-                    pos: saved.player.pos.map(v => Number.isFinite(v) ? v : 0),
-                    quat: Array.isArray(saved.player.quat) && saved.player.quat.length === 4 ? saved.player.quat : [0, 0, 0, 1]
+                    pos: [
+                        U.clamp(saved.player.pos[0], -W.HALF + 18, W.HALF - 18),
+                        U.clamp(saved.player.pos[1], -W.MAX_DEPTH / W.DEPTH_SCALE - 20, W.WATER_Y + 20),
+                        U.clamp(saved.player.pos[2], -W.HALF + 18, W.HALF - 18)
+                    ],
+                    quat: Array.isArray(saved.player.quat) && saved.player.quat.length === 4 && saved.player.quat.every(Number.isFinite) ? saved.player.quat : [0, 0, 0, 1]
                 };
             }
-            if (saved.weaver && Array.isArray(saved.weaver.pos) && saved.weaver.pos.length === 3 && world.weaver) {
+            if (saved.weaver && Array.isArray(saved.weaver.pos) && saved.weaver.pos.length === 3 && saved.weaver.pos.every(Number.isFinite) && world.weaver) {
                 world.weaver.group.position.fromArray(saved.weaver.pos);
             }
             if (saved.discoveredPois) {
@@ -2806,6 +2956,10 @@ PP.Game = (function () {
             }
             state.loadedSave = true;
             ensureContracts();
+            if (usedBackup) {
+                toast('Sauvegarde principale illisible : la sauvegarde de secours a été restaurée.', 'warn', 'SYSTÈME');
+                try { localStorage.setItem(SAVE_KEY, JSON.stringify(serialize())); } catch (restoreError) { /* secours conservé */ }
+            }
             PP.UI.updateMenu();
             updateMenuLabel();
             return true;
@@ -2824,7 +2978,7 @@ PP.Game = (function () {
         get world() { return world; }, get factory() { return factory; },
         start, pause, resume, resumeExploration, toMenu, resetGame,
         selectTool, selectBuildType, getSelectedBuildingDef: currentBuildDef,
-        useSonar, setWaypoint, clearWaypoint, saveGame, saveExists, loadGame,
+        useSonar, setWaypoint, clearWaypoint, trackMission, saveGame, saveExists, loadGame,
         applySettings, saveSettings, changeQuality,
         buyTech, craft, setRecipe, machineAction, dismantleBuilding, activateBeacon,
         deliverContract, ensureContracts, collectRelic, rerollContracts,

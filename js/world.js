@@ -1,6 +1,6 @@
 /* ============================================================================
  * world.js — Génération et rendu du monde de Thalassa-IV
- * 3 200 × 3 200 m, 10 régions, terrain LOD par chunks, flore instanciée.
+ * 6 400 × 6 400 m, 11 régions, terrain LOD par chunks, flore instanciée.
  * ==========================================================================*/
 window.PP = window.PP || {};
 
@@ -1991,11 +1991,19 @@ PP.World = (function () {
         }
 
         function buildCurrentRibbons() {
+            // Les rubans de courant doivent suivre les régions réellement
+            // dilatées, pas les anciens repères du bassin 3 200 m.
             const zones = [
-                { x: 0, z: 150, r: 360, y: 28, color: 0x34d399 },
-                { x: -780, z: -180, r: 280, y: 22, color: 0x38bdf8 },
-                { x: 760, z: -260, r: 300, y: 16, color: 0xfb7185 }
-            ];
+                { id: 'kelp', ratio: 0.64, y: 28, color: 0x34d399 },
+                { id: 'crystal', ratio: 0.60, y: 22, color: 0x38bdf8 },
+                { id: 'volcanic', ratio: 0.64, y: 16, color: 0xfb7185 }
+            ].map(def => {
+                const reg = D.REGION_BY_ID[def.id];
+                return reg ? {
+                    x: reg.center[0], z: reg.center[1], r: reg.radius * def.ratio,
+                    y: def.y, color: def.color
+                } : null;
+            }).filter(Boolean);
             zones.forEach((zone, zi) => {
                 const pts = [];
                 for (let i = 0; i < 28; i++) {

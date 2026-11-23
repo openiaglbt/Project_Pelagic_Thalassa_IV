@@ -115,6 +115,7 @@ La **console de commandement** (`Tab`) regroupe en un seul endroit la carte, l'i
 - **10 régions distinctes** — canopée photique, plateau cristallin, banquise fossile, métropole engloutie, fumeurs volcaniques, aiguilles hydrothermales, cimetière abyssal, labyrinthe d'obsidienne, Fosse de Minuit et Gueule xéno — plus la **Faille périphérique**.
 - **18 points d'intérêt** uniques : épaves, temples, monolithes, ossuaires, arches de verre, caldeira, etc.
 - **12 éclats de mémoire** cachés dans les régions. Chaque relique accorde un **bonus permanent** (vitesse, oxygène, coque, énergie, scan, forage, raffinage, discrétion, projecteur) et une archive narrative.
+- **Efflorescence bioluminescente** : un secret photographique de la canopée de Kelp, à capturer en mode photo. Il accorde une archive de codex et un souffle d'oxygène.
 - **Carte tactique** avec brouillard de guerre, balises personnalisées, points d'intérêt découverts et voyage rapide.
 - **Cartographie automatique** des régions au fil de l'exploration.
 - **Mode photo** avec masquage du HUD et quatre rendus colorimétriques.
@@ -124,7 +125,7 @@ La **console de commandement** (`Tab`) regroupe en un seul endroit la carte, l'i
 - Oxygène consommé hors des habitats, recharge dans les modules pressurisés.
 - Coque soumise aux collisions, aux créatures et à la **pression** : au-delà de la profondeur de coque, les fissures s'accumulent.
 - **10 espèces** de faune, des bancs inoffensifs au Tisserand abyssal, en passant par les prédateurs qui chassent au sonar.
-- Outils de secours : oxygène d'urgence, réparation de coque, remontée d'urgence, blocage de profondeur et signal de rappel.
+- Outils de secours : oxygène d'urgence, réparation de coque, remontée d'urgence, blocage de profondeur et signal de rappel. Un rapatriement automatique après rupture sauve la progression mais coûte **25 % du fret brut** : il ne remplace pas une remontée préparée.
 - Protocoles tactiques : **surcharge** de production, **silence** pour réduire la détection, **balayage automatique** des environs.
 
 ### Colonie et industrie
@@ -142,8 +143,9 @@ La **console de commandement** (`Tab`) regroupe en un seul endroit la carte, l'i
 
 - Console de commandement accessible avec `Tab`, avec recherche instantanée des actions.
 - Inventaire filtrable, fiches d'usage détaillées, **fabrication par lot ×5**.
-- Journal, contrats, records et objectifs regroupés.
-- **Sauvegarde automatique** toutes les 45 secondes, sauvegarde manuelle, export et import de fichier.
+- Journal, contrats, records et objectifs regroupés, avec un bouton **SUIVRE L'OBJECTIF** qui place directement la balise de navigation sur la prochaine étape cartographique.
+- **Tableau de bord de la colonie** dans le journal : production et consommation électrique, efficacité, modules, drones, convoyeurs et alertes de réseau.
+- **Sauvegarde automatique** toutes les 45 secondes, sauvegarde manuelle, export et import de fichier, avec **sauvegarde de secours** restaurée automatiquement si la principale est illisible.
 - Paramètres de qualité graphique, sensibilité, FOV, inversion d'axe, mini-carte, scanlines et échelle du HUD.
 - Notifications contextuelles et aides à l'action dans le HUD.
 
@@ -168,11 +170,11 @@ Le projet est volontairement **sans framework et sans bundler** : les scripts so
 
 ## Sauvegarde
 
-Les parties sont stockées dans le **`localStorage`** du navigateur sous la clé `pelagic_thalassa_save_v4`.
+Les parties sont stockées dans le **`localStorage`** du navigateur sous la clé `pelagic_thalassa_save_v4`, avec une copie de secours dans `pelagic_thalassa_save_v4_backup`.
 
 - Sauvegarde automatique toutes les 45 secondes.
 - Sauvegarde manuelle avec `F5` ou depuis le menu.
-- Export / import JSON depuis le menu pause, pour transférer une partie ou archiver une sauvegarde.
+- Export / import JSON depuis le menu pause, pour transférer une partie ou archiver une sauvegarde. L'import vérifie le format et conserve la partie précédente en secours.
 - Les sauvegardes sont liées à l'origine du site : jouer sur `localhost` et sur GitHub Pages crée deux stockages séparés.
 - « Réinitialiser » dans le menu principal efface la sauvegarde locale après confirmation.
 

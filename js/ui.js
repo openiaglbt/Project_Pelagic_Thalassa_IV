@@ -35,6 +35,14 @@ PP.UI = (function () {
 
     function guard(fn) { try { fn(); } catch (error) { console.error('[UI]', error); } }
 
+    // Les libellés de contrats et de marqueurs peuvent provenir d'une
+    // sauvegarde importée : ils ne doivent jamais être interprétés comme du HTML.
+    function escapeHtml(value) {
+        return String(value == null ? '' : value).replace(/[&<>"']/g, ch => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[ch]));
+    }
+
     /* ------------------------------------------------------------------ */
     /* INITIALISATION                                                      */
     /* ------------------------------------------------------------------ */
@@ -165,7 +173,7 @@ PP.UI = (function () {
         const titles = { info: 'SONDE', success: 'SYSTÈME', warn: 'ALERTE', danger: 'CRITIQUE', xeno: 'XÉNO' };
         const el = document.createElement('div');
         el.className = `toast ${type}`;
-        el.innerHTML = `<div class="t-icon">${glyphs[type] || '◈'}</div><div class="t-body"><div class="t-title">${title || titles[type] || 'SONDE'}</div><div class="t-text"></div></div>`;
+        el.innerHTML = `<div class="t-icon">${glyphs[type] || '◈'}</div><div class="t-body"><div class="t-title">${escapeHtml(title || titles[type] || 'SONDE')}</div><div class="t-text"></div></div>`;
         el.querySelector('.t-text').textContent = text;
         wrap.appendChild(el);
         notificationCount++;
@@ -345,7 +353,7 @@ PP.UI = (function () {
             $('chip-nodes').className = `field-chip ${state.nodeHighlight ? 'on' : ''}`;
         }
         if ($('chip-auto-scan')) {
-            $('chip-auto-scan').textContent = state.autoScan ? '◎ BALAYAGE AUTO ACTIF [F4]' : '◎ BALAYAGE AUTO [F4]';
+            $('chip-auto-scan').textContent = state.autoScan ? '◎ BALAYAGE AUTO ACTIF [F10]' : '◎ BALAYAGE AUTO [F10]';
             $('chip-auto-scan').className = `field-chip ${state.autoScan ? 'on' : ''}`;
         }
         if ($('chip-surge')) {
@@ -785,13 +793,13 @@ PP.UI = (function () {
             </button>`;
         }).join('');
         $('craft-ready').textContent = `${ready} PRÊTES`;
-        const batchBtn = $('inv-batch') || $('btn-batch-craft');
+        const batchBtn = $('btn-batch-craft');
         if (batchBtn) {
             batchBtn.classList.toggle('active', batchCraft);
             batchBtn.textContent = batchCraft ? '×5 ACTIVÉ' : '×5';
             batchBtn.title = batchCraft ? 'Désactiver la fabrication par lot de 5' : 'Fabriquer 5 unités par clic';
         }
-        const note = $('inv-batch-note') || $('batch-note');
+        const note = $('batch-note');
         if (note) note.textContent = batchCraft ? 'LOT ×5 — utilise 5× les ressources' : 'Lot ×5 désactivé';
     }
 
@@ -1000,9 +1008,43 @@ PP.UI = (function () {
         return null;
     }
 
+    function renderColonyDashboard() {
+        const wrap = $('colony-dashboard');
+        if (!wrap || !state) return;
+        const industrial = (state.buildings || []).filter(b => b.type !== 'hub');
+        const deficit = (state.powerConsumed || 0) > (state.powerProduced || 0);
+        const unconnectedDrills = industrial.filter(b => b.type === 'drill' && !(state.pipes || []).some(p => p.fromId === b.id || p.toId === b.id));
+        const drones = state.drones || [];
+        const activeDrones = drones.filter(d => d && d.state && d.state !== 'idle').length;
+        const alerts = [];
+        if (deficit) alerts.push('Réseau sous-alimenté : réduisez la charge ou ajoutez une prise géothermique.');
+        if (unconnectedDrills.length) alerts.push(`${unconnectedDrills.length} foreuse(s) sans convoyeur : reliez-les au hub ou à une fonderie.`);
+        if (!industrial.length) alerts.push('Aucun module industriel : construisez une foreuse et une fonderie pour lancer la colonie.');
+        const efficiency = state.powerEfficiency === undefined ? 100 : Math.round(state.powerEfficiency * 100);
+        const cells = [
+            ['PRODUCTION', `${Math.round(state.powerProduced || 0)} MW`, 'var(--emerald)'],
+            ['CONSOMMATION', `${Math.round(state.powerConsumed || 0)} MW`, deficit ? 'var(--rose)' : 'var(--ice)'],
+            ['EFFICACITÉ', `${efficiency} %`, deficit ? 'var(--amber)' : 'var(--teal)'],
+            ['MODULES', `${industrial.length}`, 'var(--ice)'],
+            ['DRONES', `${activeDrones} / ${drones.length}`, 'var(--cyan)'],
+            ['CONVOYEURS', `${(state.pipes || []).length}`, 'var(--amber)'],
+            ['COQUE', `${Math.ceil(state.hull || 0)} %`, state.hull < 30 ? 'var(--rose)' : 'var(--ice)'],
+            ['PROFONDEUR RECORD', `${Math.round(state.stats.maxDepth || 0)} m`, 'var(--violet)']
+        ];
+        wrap.innerHTML = cells.map(([label, value, color]) => `<div class="record-cell"><span>${label}</span><b style="color:${color}">${value}</b></div>`).join('');
+        const status = $('colony-alert');
+        if (status) {
+            status.textContent = alerts.length ? 'ATTENTION' : 'NOMINAL';
+            status.style.color = alerts.length ? 'var(--rose)' : 'var(--emerald)';
+        }
+        const hint = $('colony-hint');
+        if (hint) hint.textContent = alerts.length ? alerts.join(' · ') : 'Réseau stable, chaîne de production connectée et modules opérationnels.';
+    }
+
     function renderJournal() {
         const mainWrap = $('journal-main');
         if (!mainWrap) return;
+        renderColonyDashboard();
         const completed = new Set(state.completedMain || []);
         const active = getActiveMission();
         mainWrap.innerHTML = D.MAIN_MISSIONS.map((mission, index) => {
@@ -1015,6 +1057,7 @@ PP.UI = (function () {
                 <div class="m-obj">${mission.objective} · ${track.cur} / ${track.max}</div>
                 <div class="m-reward">RÉCOMPENSE : ${Object.entries(mission.reward || {}).map(([k, v]) => `${v} ${D.RESOURCES[k].short}`).join(' · ') || '—'} · +${mission.xp} XP</div>
                 <div class="bar m-bar ${done ? 'amber' : ''}"><i style="width:${done ? 100 : Math.min(100, (track.cur / Math.max(1, track.max)) * 100)}%"></i></div>
+                ${isActive && mission.target ? `<button class="btn sm ghost mission-track" data-track-mission="${mission.id}">⌖ SUIVRE L'OBJECTIF</button>` : ''}
             </div>`;
         }).join('');
         $('journal-main-count').textContent = `${D.MAIN_MISSIONS.filter(m => completed.has(m.id) || (m.id === 'm8' && state.gameWon)).length} / ${D.MAIN_MISSIONS.length}`;
@@ -1041,7 +1084,7 @@ PP.UI = (function () {
                 const have = Math.floor(state.inventory[contract.key] || 0);
                 const can = have >= contract.qty;
                 return `<div class="mission ${can ? 'active' : ''}">
-                    <div class="m-top"><span class="m-name">${contract.name}</span><span class="m-chapter">${contract.client}</span></div>
+                    <div class="m-top"><span class="m-name">${escapeHtml(contract.name)}</span><span class="m-chapter">${escapeHtml(contract.client)}</span></div>
                     <div class="m-desc">Livraison à la capsule centrale. Le stock est décompté immédiatement.</div>
                     <div class="m-obj">${contract.qty} × ${info.name} · stock ${have} / ${contract.qty}</div>
                     <div class="m-reward">RÉCOMPENSE : ${Object.entries(contract.reward).map(([k, v]) => `${v} ${D.RESOURCES[k].short}`).join(' · ')} · +${contract.xp} XP</div>
@@ -1171,7 +1214,7 @@ PP.UI = (function () {
         const list = $('map-marker-list');
         if (!list) return;
         const markers = state.mapMarkers || [];
-        list.innerHTML = markers.map((m, i) => `<button class="chip" data-marker="${i}" title="X ${Math.round(m.x)} · Z ${Math.round(m.z)}">⌖ ${m.label || `M${i + 1}`}</button>`).join('') +
+        list.innerHTML = markers.map((m, i) => `<button class="chip" data-marker="${i}" title="X ${Math.round(m.x)} · Z ${Math.round(m.z)}">⌖ ${escapeHtml(m.label || `M${i + 1}`)}</button>`).join('') +
             (markers.length ? '<button class="chip" id="map-marker-clear" title="Effacer tous les marqueurs">✕ EFFACER</button>' : '');
     }
 
@@ -1745,9 +1788,11 @@ PP.UI = (function () {
         $('close-pause').addEventListener('click', () => { closeModal('modal-pause'); if (game.resume) game.resume(); });
         $('btn-resume').addEventListener('click', () => { closeModal('modal-pause'); if (game.resume) game.resume(); });
         $('btn-pause-save').addEventListener('click', () => {
-            if (game.saveGame) game.saveGame(false);
-            $('pause-feedback').textContent = '✓ Sauvegarde complète enregistrée localement.';
-            toast('Sauvegarde enregistrée.', 'success', 'SYSTÈME');
+            const saved = game.saveGame ? game.saveGame(false) : false;
+            $('pause-feedback').textContent = saved
+                ? '✓ Sauvegarde complète enregistrée localement.'
+                : '✕ Sauvegarde impossible : stockage local indisponible ou saturé.';
+            if (saved) toast('Sauvegarde enregistrée.', 'success', 'SYSTÈME');
         });
         $('btn-pause-settings').addEventListener('click', () => { settingsReturn = 'modal-pause'; openModal('modal-settings'); });
         $('btn-pause-help').addEventListener('click', () => { settingsReturn = 'modal-pause'; openModal('modal-help'); });
@@ -1767,6 +1812,45 @@ PP.UI = (function () {
             'btn-repeat-build': () => game.repeatLastBuild && game.repeatLastBuild()
         };
         Object.entries(pauseBindings).forEach(([id, fn]) => { const el = $(id); if (el) el.addEventListener('click', fn); });
+
+        const rerollBtn = $('btn-reroll-contracts');
+        if (rerollBtn) rerollBtn.addEventListener('click', () => {
+            if (game.rerollContracts) game.rerollContracts();
+            renderJournal();
+        });
+
+        const importBtn = $('btn-pause-import');
+        const importInput = $('import-save-file');
+        if (importBtn && importInput) {
+            importBtn.addEventListener('click', () => importInput.click());
+            importInput.addEventListener('change', () => {
+                const file = importInput.files && importInput.files[0];
+                importInput.value = '';
+                if (!file) return;
+                if (file.size > 8 * 1024 * 1024) {
+                    toast('Fichier trop volumineux : 8 Mo maximum.', 'danger', 'SYSTÈME');
+                    return;
+                }
+                const feedback = $('pause-feedback');
+                if (feedback) feedback.textContent = 'Lecture de la sauvegarde…';
+                const reader = new FileReader();
+                reader.onload = () => {
+                    if (game.importSave && game.importSave(String(reader.result || ''))) {
+                        if (feedback) feedback.textContent = '✓ Sauvegarde importée. Rechargement…';
+                        toast('Sauvegarde importée. Rechargement de l’expédition…', 'success', 'SYSTÈME');
+                        setTimeout(() => location.reload(), 700);
+                    } else {
+                        if (feedback) feedback.textContent = '✕ Import refusé : fichier invalide.';
+                        toast('Import refusé : sauvegarde invalide ou incompatible.', 'danger', 'SYSTÈME');
+                    }
+                };
+                reader.onerror = () => {
+                    if (feedback) feedback.textContent = '✕ Lecture du fichier impossible.';
+                    toast('Lecture du fichier impossible.', 'danger', 'SYSTÈME');
+                };
+                reader.readAsText(file);
+            });
+        }
 
         $('modal-tech').addEventListener('click', e => {
             const btn = e.target.closest('[data-tech]');
@@ -1794,8 +1878,19 @@ PP.UI = (function () {
             });
             invSearchInput.addEventListener('keydown', e => { if (e.key === 'Escape') { e.stopPropagation(); } });
         }
-        const batchToggle = $('inv-batch') || $('btn-batch-craft');
+        const batchToggle = $('btn-batch-craft');
         if (batchToggle) batchToggle.addEventListener('click', () => { batchCraft = !batchCraft; batchToggle.setAttribute('aria-pressed', String(batchCraft)); renderInventory(); });
+        const invGrid = $('inv-grid');
+        if (invGrid) {
+            invGrid.addEventListener('keydown', e => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                const cell = e.target.closest('[data-res-key]');
+                if (!cell) return;
+                e.preventDefault();
+                invSelected = cell.dataset.resKey;
+                renderInventory();
+            });
+        }
         const marketBtn = $('btn-inv-market');
         if (marketBtn) marketBtn.addEventListener('click', () => openJournal());
 
@@ -1829,6 +1924,8 @@ PP.UI = (function () {
         });
 
         $('modal-journal').addEventListener('click', e => {
+            const track = e.target.closest('[data-track-mission]');
+            if (track) { if (game.trackMission) game.trackMission(track.dataset.trackMission); return; }
             const buy = e.target.closest('[data-buy]');
             if (buy) { if (game.buyMarket) game.buyMarket(buy.dataset.buy); renderJournal(); return; }
             const sell = e.target.closest('[data-sell]');

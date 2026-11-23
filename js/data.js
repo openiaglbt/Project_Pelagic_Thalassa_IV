@@ -521,6 +521,7 @@ PP.Data = (function () {
             desc: 'La capsule est stable, mais l\'oxygène ne durera pas. Construisez un module habitat pour établir un point de ravitaillement.',
             hint: 'Barre d\'outils [2] puis clic gauche sur le sol. Rapprochez-vous de l\'habitat pour recharger l\'O₂.',
             objective: 'Construire 1 module habitat',
+            target: { hub: true, label: 'Capsule coloniale' },
             reward: { titaniumIngot: 6, lithiumCell: 2 }, xp: 120,
             track(s) { return { cur: Math.min(1, s.stats.habitats || 0), max: 1 }; }
         },
@@ -529,9 +530,19 @@ PP.Data = (function () {
             desc: 'Une colonie sans industrie n\'est qu\'un tombeau. Ancrez une foreuse sur un gisement, installez une fonderie et reliez-les.',
             hint: 'Foreuse [3] sur un filon, fonderie [4] à proximité, puis convoyeur [6] : cliquez la foreuse, puis la fonderie.',
             objective: 'Foreuse + fonderie reliées par convoyeur',
+            target: { hub: true, label: 'Chantier colonial' },
             reward: { magnetCoil: 2, glassPane: 3 }, xp: 180,
             track(s) {
-                const linked = s.pipes.length > 0 && s.buildings.some(b => b.type === 'drill') && s.buildings.some(b => b.type === 'smelter');
+                // La liaison doit réellement relier une foreuse à une fonderie :
+                // un convoyeur vers un habitat ne suffit pas à valider la chaîne.
+                const linked = s.pipes.some(p => {
+                    const from = s.buildings.find(b => b.id === p.fromId);
+                    const to = s.buildings.find(b => b.id === p.toId);
+                    return from && to && (
+                        (from.type === 'drill' && to.type === 'smelter') ||
+                        (from.type === 'smelter' && to.type === 'drill')
+                    );
+                });
                 const built = (s.buildings.some(b => b.type === 'drill') ? 1 : 0) + (s.buildings.some(b => b.type === 'smelter') ? 1 : 0);
                 return { cur: linked ? 3 : built, max: 3 };
             }
@@ -549,6 +560,7 @@ PP.Data = (function () {
             desc: 'Les relevés indiquent un plateau cristallin à l\'ouest. Descendez sous 250 m pour en confirmer l\'existence.',
             hint: 'Suivez le marqueur de mission sur la carte [M]. Restez sous votre seuil d\'écrasement.',
             objective: 'Atteindre 250 m de profondeur',
+            target: { region: 'crystal', label: 'Plateau Cristallin' },
             reward: { cryoQuartz: 6, titaniumIngot: 4 }, xp: 220,
             track(s) { return { cur: Math.min(250, Math.round(s.stats.maxDepth || 0)), max: 250 }; }
         },
@@ -557,6 +569,7 @@ PP.Data = (function () {
             desc: 'Des fumerolles ont été détectées à l\'est. Installez une prise géothermique sur une cheminée pour sécuriser l\'énergie.',
             hint: 'Une fois sur place, posez la prise [5] près d\'une cheminée : le bonus passe à +70 MW.',
             objective: 'Construire une prise sur une cheminée',
+            target: { region: 'volcanic', label: 'Fumeurs Volcaniques' },
             reward: { magnetCoil: 3, thermicAlloy: 1 }, xp: 260,
             track(s) { return { cur: Math.min(1, s.stats.ventThermals || 0), max: 1 }; }
         },
@@ -565,6 +578,7 @@ PP.Data = (function () {
             desc: 'Un signal répétitif provient du Cimetière abyssal. Trouvez le monolithe des Précurseurs et déchiffrez son message.',
             hint: 'Le monolithe se trouve au sud-ouest, à environ 800 m de profondeur. Explorez les environs.',
             objective: 'Découvrir le Monolithe des Précurseurs',
+            target: { poi: 'monolith', label: 'Monolithe des Précurseurs' },
             reward: { xenoMatter: 4, glassPane: 4 }, xp: 320,
             track(s) { return { cur: s.discoveredPois['monolith'] ? 1 : 0, max: 1 }; }
         },
@@ -573,6 +587,7 @@ PP.Data = (function () {
             desc: 'La source du signal est plus bas encore. Atteignez 1 200 m dans la Fosse de Minuit et rapportez un échantillon de matière xéno.',
             hint: 'Une coque Mk.III est indispensable. Récoltez la matière xéno et surveillez le Tisserand.',
             objective: 'Atteindre 1 200 m et récolter 4 matières xéno',
+            target: { region: 'midnight', label: 'Fosse de Minuit' },
             reward: { xenoMatter: 4, lithiumCell: 4 }, xp: 400,
             track(s) {
                 const d = (s.stats.maxDepth || 0) >= 1200 ? 1 : 0;
@@ -585,6 +600,7 @@ PP.Data = (function () {
             desc: 'La colonie est autonome. Stabilisez trois noyaux xéno et activez la balise orbitale depuis la console de recherche.',
             hint: 'Noyaux xéno : fonderie avec matière xéno + bobine + uraninite. La console se trouve dans l\'arbre technologique [T].',
             objective: 'Activer la balise orbitale',
+            target: { hub: true, label: 'Capsule orbitale' },
             reward: {}, xp: 1000,
             track(s) { return { cur: s.gameWon ? 1 : 0, max: 1 }; }
         }
@@ -599,7 +615,7 @@ PP.Data = (function () {
         {
             id: 's2', name: 'Bâtisseur', desc: 'Établissez six bâtiments opérationnels sur le plancher océanique.',
             objective: '6 bâtiments construits', reward: { titaniumIngot: 6, magnetCoil: 2 }, xp: 180,
-            track(s) { return { cur: Math.min(6, s.buildings.length - 1), max: 6 }; }
+            track(s) { return { cur: Math.max(0, Math.min(6, s.buildings.length - 1)), max: 6 }; }
         },
         {
             id: 's3', name: 'Logisticien', desc: 'Reliez trois bâtiments par des convoyeurs pneumatiques.',
