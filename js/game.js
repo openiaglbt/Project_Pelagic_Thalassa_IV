@@ -1312,9 +1312,16 @@ PP.Game = (function () {
             if (state.isPlaying && !PP.UI.anyModalOpen() && ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) e.preventDefault();
             keys[e.code] = true;
 
-            if (e.code === 'Escape') {
+            const activeEl = document.activeElement;
+            const typing = activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA' || activeEl.isContentEditable);
+            if (e.code === 'Escape' || (e.code === 'Backspace' && !typing)) {
                 e.preventDefault();
                 if (PP.UI.handleEscape()) return;
+                if (e.code === 'Backspace' && state.isPlaying) {
+                    if (state.isPaused) resume();
+                    else pause();
+                    return;
+                }
                 if (state.isPlaying) {
                     if (state.isPaused) resume();
                     else pause();
@@ -1323,13 +1330,13 @@ PP.Game = (function () {
             }
             if (!state.isPlaying) return;
 
-            if (e.code === 'KeyI') { if (!PP.UI.isOpen('modal-inventory')) PP.UI.openInventory(); return; }
-            if (e.code === 'KeyT') { if (!PP.UI.isOpen('modal-tech')) PP.UI.openTech(); return; }
-            if (e.code === 'KeyM') { if (!PP.UI.isOpen('modal-map')) PP.UI.openMap(); return; }
-            if (e.code === 'KeyB') { if (!PP.UI.isOpen('modal-catalog')) PP.UI.openCatalog(); return; }
-            if (e.code === 'KeyJ') { if (!PP.UI.isOpen('modal-journal')) PP.UI.openJournal(); return; }
-            if (e.code === 'KeyC') { if (!PP.UI.isOpen('modal-codex')) PP.UI.openCodex(); return; }
-            if (e.code === 'KeyO') { if (!PP.UI.isOpen('modal-settings')) PP.UI.openSettings(); return; }
+            if (e.code === 'KeyI') { if (PP.UI.isOpen('modal-inventory')) PP.UI.closeModal('modal-inventory'); else PP.UI.openInventory(); return; }
+            if (e.code === 'KeyT') { if (PP.UI.isOpen('modal-tech')) PP.UI.closeModal('modal-tech'); else PP.UI.openTech(); return; }
+            if (e.code === 'KeyM') { if (PP.UI.isOpen('modal-map')) PP.UI.closeModal('modal-map'); else PP.UI.openMap(); return; }
+            if (e.code === 'KeyB') { if (PP.UI.isOpen('modal-catalog')) PP.UI.closeModal('modal-catalog'); else PP.UI.openCatalog(); return; }
+            if (e.code === 'KeyJ') { if (PP.UI.isOpen('modal-journal')) PP.UI.closeModal('modal-journal'); else PP.UI.openJournal(); return; }
+            if (e.code === 'KeyC') { if (PP.UI.isOpen('modal-codex')) PP.UI.closeModal('modal-codex'); else PP.UI.openCodex(); return; }
+            if (e.code === 'KeyO') { if (PP.UI.isOpen('modal-settings')) PP.UI.closeModal('modal-settings'); else PP.UI.openSettings(); return; }
             if (e.code === 'KeyH') {
                 if (PP.UI.isOpen('modal-pause') || state.isPaused) return;
                 if (PP.UI.isOpen('modal-help')) PP.UI.closeModal('modal-help');

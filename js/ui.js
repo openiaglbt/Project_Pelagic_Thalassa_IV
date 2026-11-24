@@ -1719,6 +1719,37 @@ PP.UI = (function () {
                 e.preventDefault(); first.focus();
             }
         });
+        // Navigation aux flèches dans les panneaux : les menus deviennent
+        // utilisables sans souris ni Échap.
+        document.addEventListener('keydown', e => {
+            const modal0 = MODALS.map($).find(el => el && !el.classList.contains('hidden'));
+            const mainMenu = $('main-menu');
+            const menuVisible = mainMenu && !mainMenu.classList.contains('hidden');
+            if (!modal0 && !menuVisible) return;
+            const modal = modal0 || (menuVisible ? mainMenu : null);
+            if (!modal) return;
+            const active = document.activeElement;
+            const typing = active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA' || active.isContentEditable);
+            if (typing && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) return;
+            if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Enter', ' '].includes(e.key)) return;
+            const items = focusableIn(modal);
+            if (!items.length) return;
+            const idx = items.indexOf(active);
+            if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
+                e.preventDefault();
+                const next = idx <= 0 ? items[items.length - 1] : items[idx - 1];
+                next.focus({ preventScroll: true });
+            } else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
+                e.preventDefault();
+                const next = idx < 0 || idx >= items.length - 1 ? items[0] : items[idx + 1];
+                next.focus({ preventScroll: true });
+            } else if (e.key === 'Enter' || e.key === ' ') {
+                if (active && typeof active.click === 'function' && modal.contains(active)) {
+                    e.preventDefault();
+                    active.click();
+                }
+            }
+        });
     }
 
     function bindMenu() {
