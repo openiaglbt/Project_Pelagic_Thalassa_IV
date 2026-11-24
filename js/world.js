@@ -244,7 +244,9 @@ PP.World = (function () {
         const c = document.createElement('canvas');
         c.width = size; c.height = size;
         const ctx = c.getContext('2d');
-        ctx.fillStyle = '#a8a396';
+        // Base volontairement sourde : une texture claire, multipliée par la
+        // lumière, transformait le fond en nappe laiteuse.
+        ctx.fillStyle = '#928c7f';
         ctx.fillRect(0, 0, size, size);
 
         // Grandes taches de sédiment, volontairement irrégulières : des
@@ -467,7 +469,9 @@ PP.World = (function () {
                     uTop: { value: new THREE.Color(0x031a28) },
                     uHorizon: { value: new THREE.Color(0x073247) },
                     uAccent: { value: new THREE.Color(0x22d3ee) },
-                    uTime: { value: 0 }
+                    uTime: { value: 0 },
+                    uDepth: { value: 0 },
+                    uSunDir: { value: new THREE.Vector3(0.34, 0.80, 0.49).normalize() }
                 },
                 vertexShader: `
                     varying vec3 vDir;
@@ -480,7 +484,9 @@ PP.World = (function () {
                     uniform vec3 uTop;
                     uniform vec3 uHorizon;
                     uniform vec3 uAccent;
+                    uniform vec3 uSunDir;
                     uniform float uTime;
+                    uniform float uDepth;
                     varying vec3 vDir;
                     void main() {
                         float h = clamp(vDir.y * 0.5 + 0.5, 0.0, 1.0);
@@ -491,6 +497,14 @@ PP.World = (function () {
                         col = mix(col, uAccent, band * 0.08);
                         float shimmer = sin(vDir.x * 23.0 + uTime * 0.14) * sin(vDir.z * 19.0 - uTime * 0.11);
                         col += uAccent * (0.004 + max(0.0, shimmer) * 0.005);
+                        // Soleil diffusé par la colonne d'eau : un halo large
+                        // et un disque net, tous deux éteints avec la profondeur.
+                        float sunAlign = max(dot(vDir, normalize(uSunDir)), 0.0);
+                        float halo = pow(sunAlign, 6.0);
+                        float disc = pow(sunAlign, 420.0);
+                        float surface = 1.0 - uDepth;
+                        col += vec3(0.10, 0.30, 0.38) * halo * 0.12 * surface;
+                        col += vec3(0.62, 0.92, 1.00) * disc * 0.55 * surface;
                         gl_FragColor = vec4(col, 1.0);
                     }
                 `
@@ -523,8 +537,9 @@ PP.World = (function () {
                     void main() {
                         vec3 p = position;
                         float w = sin((p.x + uTime * 9.0) * 0.018) * cos((p.y - uTime * 6.0) * 0.021);
-                        p.z += w * 1.35;
-                        vWave = w;
+                        float w2 = sin((p.x + uTime * 15.0) * 0.042 + p.y * 0.011) * cos((p.y - uTime * 11.0) * 0.037);
+                        p.z += w * 1.15 + w2 * 0.55;
+                        vWave = w * 0.72 + w2 * 0.28;
                         vec4 wp = modelMatrix * vec4(p, 1.0);
                         vWorld = wp.xyz;
                         gl_Position = projectionMatrix * viewMatrix * wp;
@@ -546,7 +561,13 @@ PP.World = (function () {
                         float fine = 0.5 + 0.5 * sin(vWorld.x * 0.16 - vWorld.z * 0.11 + uTime * 0.9);
                         vec3 col = mix(uColorA, uColorB, bands * 0.42 + caustic * 0.38 + fine * 0.05);
                         col += vec3(0.06, 0.22, 0.24) * caustic;
-                        float alpha = 0.52 + vWave * 0.05 + caustic * 0.10;
+                        // Reflet de la surface : le regard rasant accroche une
+                        // lame claire, comme une vraie interface air/eau.
+                        vec3 viewVec = normalize(cameraPosition - vWorld);
+                        float fresnel = pow(1.0 - clamp(abs(viewVec.y), 0.0, 1.0), 3.0);
+                        float glint = pow(caustic, 2.0) * (0.22 + fresnel * 1.35);
+                        col += vec3(0.42, 0.74, 0.82) * glint;
+                        float alpha = 0.50 + vWave * 0.05 + caustic * 0.10 + fresnel * 0.12;
                         // Fondu vers la brume de région : la surface rejoint
                         // l'horizon sans arête visible.
                         float dist = length(vWorld - cameraPosition);
@@ -594,6 +615,8 @@ PP.World = (function () {
                 );
                 ray.rotation.y = Math.random() * Math.PI;
                 ray.rotation.z = (Math.random() - 0.5) * 0.14;
+                ray.userData.baseOpacity = mat.opacity;
+                ray.userData.baseRotZ = ray.rotation.z;
                 group.add(ray);
             }
             scene.add(group);
@@ -694,6 +717,9 @@ PP.World = (function () {
         const CHUNK_COUNT = 20;
         const CHUNK_SIZE = W.SIZE / CHUNK_COUNT;
         const HUB_CLEAR_RADIUS = 92;
+        // Horloge partagée par tous les matériaux de fond : une seule valeur
+        // à mettre à jour pour animer les caustiques de toute la carte.
+        const causticUniform = { value: 0 };
 
         function createChunk(cx, cz, segments, isLow) {
             const geo = new THREE.PlaneGeometry(CHUNK_SIZE, CHUNK_SIZE, segments, segments);
@@ -736,16 +762,48 @@ PP.World = (function () {
                 colors[i * 3 + 2] = col.b * shade;
             }
             geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            const seabedMap = api.seabedTex || (api.seabedTex = makeSeabedTexture(512));
+            const seabedBump = api.seabedBump || (api.seabedBump = makeNoiseTexture(256, 8));
+            seabedMap.wrapS = seabedMap.wrapT = THREE.RepeatWrapping;
+            seabedBump.wrapS = seabedBump.wrapT = THREE.RepeatWrapping;
+            // Le relief de sédiment doit se lire à l'échelle d'un pas, pas
+            // d'un quart de chunk : on serre la répétition du bump seul.
+            seabedBump.repeat.set(28, 28);
             const mat = new THREE.MeshStandardMaterial({
                 vertexColors: true,
                 roughness: 0.9,
                 metalness: 0.05,
-                map: api.seabedTex || (api.seabedTex = makeSeabedTexture(512)),
-                bumpMap: api.seabedBump || (api.seabedBump = makeNoiseTexture(256, 8)),
+                map: seabedMap,
+                bumpMap: seabedBump,
                 bumpScale: 0.55,
-                roughnessMap: api.seabedBump,
+                roughnessMap: seabedBump,
                 envMapIntensity: 0.4
             });
+            // Caustiques de surface : la lumière du soleil se concentre en
+            // résilles sur les hauts-fonds. Le motif suit la position monde,
+            // donc il reste continu d'un chunk à l'autre.
+            if (q.quality === 'high' || q.quality === 'ultra') {
+                mat.onBeforeCompile = shader => {
+                    shader.uniforms.uCausticTime = causticUniform;
+                    mat.userData.shader = shader;
+                    shader.vertexShader = 'varying vec3 vCausticWorld;\n' + shader.vertexShader;
+                    shader.vertexShader = shader.vertexShader.replace(
+                        '#include <begin_vertex>',
+                        '#include <begin_vertex>\nvCausticWorld = (modelMatrix * vec4(transformed, 1.0)).xyz;'
+                    );
+                    shader.fragmentShader = 'varying vec3 vCausticWorld;\nuniform float uCausticTime;\n' + shader.fragmentShader;
+                    shader.fragmentShader = shader.fragmentShader.replace(
+                        '#include <color_fragment>',
+                        `#include <color_fragment>
+                        float causticShallow = smoothstep(-120.0, -4.0, vCausticWorld.y);
+                        float c1 = sin(vCausticWorld.x * 0.36 + uCausticTime * 0.85) * sin(vCausticWorld.z * 0.31 - uCausticTime * 0.66);
+                        float c2 = sin(vCausticWorld.x * 0.71 - uCausticTime * 1.18) * sin(vCausticWorld.z * 0.64 + uCausticTime * 0.94);
+                        float causticMask = pow(clamp(c1 * 0.5 + 0.5, 0.0, 1.0), 3.0) * pow(clamp(c2 * 0.5 + 0.5, 0.0, 1.0), 2.0);
+                        diffuseColor.rgb += diffuseColor.rgb * causticMask * causticShallow * 0.95;`
+                    );
+                };
+                mat.customProgramCacheKey = () => 'terrain-caustics';
+            }
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.set(cx, 0, cz);
             mesh.receiveShadow = !isLow && q.shadows;
@@ -985,15 +1043,15 @@ PP.World = (function () {
                 const x = (i - 1) * 0.8;
                 const z = (Math.random() - 0.5) * 1.2;
                 const trunk = new THREE.CylinderGeometry(0.08, 0.24, h, 5);
-                addPart(parts, trunk, i % 2 ? '#fb923c' : '#f472b6', x, h / 2, z, 0.08, 0, (Math.random() - 0.5) * 0.18);
-                gradientize(trunk, '#7f1d3f', i % 2 ? '#fdba74' : '#f9a8d4', 0.07);
+                addPart(parts, trunk, i % 2 ? '#fb923c' : '#f97316', x, h / 2, z, 0.08, 0, (Math.random() - 0.5) * 0.18);
+                gradientize(trunk, '#7c2d12', i % 2 ? '#fdba74' : '#fbbf24', 0.07);
                 for (let b = 0; b < 3; b++) {
                     const a = (b / 3) * Math.PI * 2 + i;
                     const bh = h * (0.5 + b * 0.12);
                     const branch = new THREE.CylinderGeometry(0.04, 0.10, 1.5 + Math.random(), 4);
-                    addPart(parts, branch, '#fda4af', x + Math.cos(a) * 0.38, bh, z + Math.sin(a) * 0.38,
+                    addPart(parts, branch, '#fb923c', x + Math.cos(a) * 0.38, bh, z + Math.sin(a) * 0.38,
                         Math.cos(a) * 0.7, 0, Math.sin(a) * 0.7);
-                    gradientize(branch, '#9d174d', '#fecdd3', 0.06);
+                    gradientize(branch, '#9a3412', '#fed7aa', 0.06);
                     addPart(parts, new THREE.SphereGeometry(0.16 + Math.random() * 0.12, 5, 4), '#fef3c7',
                         x + Math.cos(a) * 0.72, bh + 0.75, z + Math.sin(a) * 0.72);
                 }
@@ -1016,10 +1074,10 @@ PP.World = (function () {
                     pos.setX(v, pos.getX(v) * (1 - t * 0.35));
                 }
                 const a = (i / 7) * Math.PI * 2;
-                addPart(parts, geo, i % 2 ? '#2dd4bf' : '#f472b6',
+                addPart(parts, geo, i % 2 ? '#2dd4bf' : '#f59e0b',
                     Math.cos(a) * 0.22, 0, Math.sin(a) * 0.22,
                     (Math.random() - 0.5) * 0.18, a, 0.18 + Math.random() * 0.45);
-                gradientize(geo, '#0f3d3a', i % 2 ? '#5eead4' : '#f9a8d4', 0.08);
+                gradientize(geo, '#0f3d3a', i % 2 ? '#5eead4' : '#fbbf24', 0.08);
             }
             addPart(parts, new THREE.SphereGeometry(0.28, 6, 5), '#fef3c7', 0, 0.2, 0);
             return mergeGeometries(parts);
@@ -1083,9 +1141,9 @@ PP.World = (function () {
                 { id: 'basalt', geo: makeBasaltGeometry(), color: '#f97316', emissive: '#9a3412', rough: 0.9, metal: 0.12, glow: 0.42, regions: ['volcanic', 'hydro', 'labyrinth'] },
                 { id: 'bone', geo: makeBoneGeometry(), color: '#e2e8f0', emissive: '#312e81', rough: 0.55, metal: 0.04, glow: 0.12, regions: ['graveyard', 'frozen'] },
                 { id: 'xeno', geo: makeXenoGeometry(), color: '#e879f9', emissive: '#7e22ce', rough: 0.32, metal: 0.2, glow: 1.15, regions: ['midnight', 'maw', 'labyrinth'] },
-                { id: 'coral', geo: makeCoralGeometry(), color: '#fb923c', emissive: '#831843', rough: 0.62, metal: 0.05, glow: 0.42, regions: ['metropolis', 'kelp', 'hydro'], size: 1.35 },
+                { id: 'coral', geo: makeCoralGeometry(), color: '#fb923c', emissive: '#7c2d12', rough: 0.72, metal: 0.04, glow: 0.22, regions: ['metropolis', 'kelp', 'hydro'], size: 1.1 },
                 { id: 'fan', geo: makeFanGeometry(), color: '#5eead4', emissive: '#0f766e', rough: 0.6, metal: 0.04, glow: 0.5, regions: ['kelp', 'crystal', 'hydro', 'metropolis', 'graveyard'], density: 0.28, size: 1.45 },
-                { id: 'anemone', geo: makeAnemoneGeometry(), color: '#e879f9', emissive: '#7e22ce', rough: 0.45, metal: 0.08, glow: 0.85, regions: ['kelp', 'crystal', 'frozen', 'midnight', 'maw'], density: 0.16, size: 1.2 },
+                { id: 'anemone', geo: makeAnemoneGeometry(), color: '#c084fc', emissive: '#581c87', rough: 0.5, metal: 0.06, glow: 0.45, regions: ['kelp', 'crystal', 'frozen', 'midnight', 'maw'], density: 0.16, size: 1.0 },
                 { id: 'turf', geo: makeUnderstoryGeometry('#0a5c4b', '#4ade80'), color: '#22c55e', emissive: '#064e3b', rough: 0.8, metal: 0.02, glow: 0.16, regions: ['kelp', 'metropolis', 'hydro', 'crystal'], density: 6.0, size: 1.32 },
                 { id: 'turfEmber', geo: makeUnderstoryGeometry('#4c1d12', '#fb923c'), color: '#f97316', emissive: '#7c2d12', rough: 0.9, metal: 0.03, glow: 0.22, regions: ['volcanic', 'hydro'], density: 5.2, size: 1.22 },
                 { id: 'turfIce', geo: makeUnderstoryGeometry('#164e63', '#a5f3fc'), color: '#67e8f9', emissive: '#0e7490', rough: 0.5, metal: 0.05, glow: 0.26, regions: ['frozen', 'crystal', 'graveyard'], density: 4.8, size: 1.28 },
@@ -1132,9 +1190,12 @@ PP.World = (function () {
                         if (Math.hypot(x, z) < 24) continue;
                         if (slopeAt(x, z) > 0.85) continue;
                         const y = height(x, z);
-                        const hero = rng() < 0.035;
+                        // Les « héros » ne poussent plus collés à la capsule :
+                        // une fronde de 30 m au ras de la vitre bouchait la vue.
+                        const distHub = Math.hypot(x, z);
+                        const hero = rng() < 0.035 && distHub > 110;
                         const sizeBoost = type.size || 1;
-                        const scale = (hero ? 1.8 + rng() * 0.9 : 0.78 + rng() * 0.9) * sizeBoost;
+                        const scale = (hero ? 1.45 + rng() * 0.65 : 0.78 + rng() * 0.9) * sizeBoost;
                         placements[ti].push({
                             x, y, z,
                             sx: scale * (0.88 + rng() * 0.22),
@@ -2354,7 +2415,10 @@ PP.World = (function () {
                     .multiplyScalar(1.01 - depth * 0.04)
                     .lerp(new THREE.Color(reg.accent), 0.05 + depth * 0.05);
                 api.skyMat.uniforms.uTime.value = elapsed;
+                // Le soleil ne se voit plus passé quelques centaines de mètres.
+                api.skyMat.uniforms.uDepth.value = U.clamp(depth * 2.4, 0, 1);
             }
+            causticUniform.value = elapsed;
             if (api.water) {
                 api.water.material.uniforms.uTime.value = elapsed;
                 if (scene.fog) api.water.material.uniforms.uFogColor.value.copy(scene.fog.color);
@@ -2376,8 +2440,21 @@ PP.World = (function () {
                 if (api.snowMat) api.snowMat.uniforms.uTime.value = elapsed;
             }
             // Les rais restent ancrés à la surface : ils ne doivent jamais
-            // traverser la ligne d'eau quand la caméra descend.
-            if (api.rays) api.rays.position.set(camera.position.x, 0, camera.position.z);
+            // traverser la ligne d'eau quand la caméra descend. Ils faiblissent
+            // avec la profondeur et respirent lentement, sinon ils dessinent
+            // des cônes fixes qui trahissent le décor.
+            if (api.rays) {
+                api.rays.position.set(camera.position.x, 0, camera.position.z);
+                const rayDepth = U.clamp((W.WATER_Y - camera.position.y) * W.DEPTH_SCALE, 0, 2000);
+                const rayFade = 1 - U.smoothstep(60, 560, rayDepth);
+                api.rays.visible = rayFade > 0.01;
+                for (let i = 0; i < api.rays.children.length; i++) {
+                    const ray = api.rays.children[i];
+                    const base = ray.userData.baseOpacity || 0.1;
+                    ray.material.opacity = base * rayFade * (0.72 + 0.28 * Math.sin(elapsed * 0.42 + i * 1.7));
+                    ray.rotation.z = (ray.userData.baseRotZ || 0) + Math.sin(elapsed * 0.11 + i) * 0.022;
+                }
+            }
 
             // Culling et LOD
             cullTimer -= dt;

@@ -17,7 +17,7 @@ PP.Game = (function () {
 
     const canvas = document.getElementById('game-canvas');
     let scene, camera, renderer, clock;
-    let composer, bloomPass, lastSceneRender;
+    let composer, bloomPass, gradePass, lastSceneRender;
     let world, factory;
     let hemi, dir, rim, ambient, headlamp, accentLight;
     let waypointGroup, wpBeacon;
@@ -194,6 +194,73 @@ PP.Game = (function () {
     /* ------------------------------------------------------------------ */
     /* POST-TRAITEMENT                                                     */
     /* ------------------------------------------------------------------ */
+    /* Étalonnage final : vignettage, grain, aberration chromatique et
+       correction de contraste. C'est ce qui distingue une scène « rendue »
+       d'une image de synthèse brute, sans coûter une seconde passe 3D. */
+    const GradeShader = {
+        uniforms: {
+            tDiffuse: { value: null },
+            uTime: { value: 0 },
+            uVignette: { value: 0.14 },
+            uGrain: { value: 0.022 },
+            uAberration: { value: 0.0009 },
+            uSaturation: { value: 1.08 },
+            uContrast: { value: 1.05 },
+            uDamage: { value: 0 }
+        },
+        vertexShader: `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `,
+        fragmentShader: `
+            uniform sampler2D tDiffuse;
+            uniform float uTime;
+            uniform float uVignette;
+            uniform float uGrain;
+            uniform float uAberration;
+            uniform float uSaturation;
+            uniform float uContrast;
+            uniform float uDamage;
+            varying vec2 vUv;
+
+            float hash(vec2 p) {
+                return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+            }
+
+            void main() {
+                vec2 centered = vUv - 0.5;
+                float r2 = dot(centered, centered);
+                // L'aberration ne se voit qu'en périphérie : c'est une lentille,
+                // pas un filtre coloré sur toute l'image.
+                float ab = uAberration * (0.35 + r2 * 2.6);
+                vec3 col;
+                col.r = texture2D(tDiffuse, vUv + centered * ab).r;
+                col.g = texture2D(tDiffuse, vUv).g;
+                col.b = texture2D(tDiffuse, vUv - centered * ab).b;
+
+                col = (col - 0.5) * uContrast + 0.5;
+                float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+                col = mix(vec3(luma), col, uSaturation);
+
+                float vig = smoothstep(0.28, 0.88, length(centered));
+                col *= 1.0 - vig * uVignette;
+
+                // Grain animé, plus lisible dans les ombres que dans les hautes
+                // lumières : il donne de la matière au bleu profond.
+                float n = hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 71.0) - 0.5;
+                col += n * uGrain * (0.45 + (1.0 - luma) * 0.85);
+
+                // Voile rouge à la périphérie quand la coque cède.
+                col = mix(col, vec3(0.30, 0.015, 0.04), uDamage * vig * 0.32);
+
+                gl_FragColor = vec4(col, 1.0);
+            }
+        `
+    };
+
     function disposeComposer() {
         if (composer) {
             try {
@@ -204,6 +271,7 @@ PP.Game = (function () {
         }
         composer = null;
         bloomPass = null;
+        gradePass = null;
         lastSceneRender = null;
     }
 
@@ -233,6 +301,10 @@ PP.Game = (function () {
             if (bloomPass.basic) bloomPass.basic.toneMapped = false;
             if (bloomPass.materialCopy) bloomPass.materialCopy.toneMapped = false;
             composer.addPass(bloomPass);
+            if (THREE.ShaderPass) {
+                gradePass = new THREE.ShaderPass(GradeShader);
+                composer.addPass(gradePass);
+            }
             composer.setPixelRatio(renderer.getPixelRatio());
             composer.setSize(window.innerWidth, window.innerHeight);
         } catch (error) {
@@ -2145,35 +2217,42 @@ PP.Game = (function () {
             PP.Audio.setRegion(region);
         }
         const preset = qualityPreset();
-        const targetBg = new THREE.Color(region.fog);
-        const targetFog = region.fogDensity * preset.fog * 0.72;
         const depth = world.depthOf(camera.position.y);
         const depthFactor = U.clamp(depth / 2200, 0, 1);
+        // Extinction de la lumière solaire dans la colonne d'eau : à 350 m il
+        // ne reste qu'un tiers de l'éclairement de surface, à 1 000 m presque
+        // rien. Sans cela, un fond à 100 m et un fond à 900 m se ressemblaient.
+        const extinction = Math.exp(-depth / 620);
+        const deepInk = new THREE.Color(0x01070e);
+        const targetBg = new THREE.Color(region.fog)
+            .lerp(deepInk, Math.min(0.88, depthFactor * 0.85))
+            .lerp(new THREE.Color(region.accent), depthFactor * 0.03);
+        const targetFog = region.fogDensity * preset.fog * (0.60 + depthFactor * 0.55);
         scene.background.lerp(targetBg, Math.min(1, dt * 1.6));
         scene.fog.color.lerp(targetBg, Math.min(1, dt * 1.6));
         scene.fog.density += (targetFog - scene.fog.density) * Math.min(1, dt * 1.8);
 
         const accent = new THREE.Color(region.accent);
-        const skyTint = new THREE.Color(region.lightTop).lerp(new THREE.Color(0x2a6f92), 0.42);
+        const skyTint = new THREE.Color(region.lightTop).lerp(new THREE.Color(0x2a6f92), 0.55);
         hemi.color.lerp(skyTint, Math.min(1, dt * 1.4));
         hemi.groundColor.lerp(new THREE.Color(region.lightBottom), Math.min(1, dt * 1.4));
-        hemi.intensity += ((0.08 + region.lightIntensity * 0.34) - hemi.intensity) * Math.min(1, dt * 1.4);
+        hemi.intensity += ((0.14 + region.lightIntensity * 0.30 * extinction) - hemi.intensity) * Math.min(1, dt * 1.4);
         const sunTint = new THREE.Color(region.lightTop)
-            .lerp(new THREE.Color(0xffd9a8), 0.28 * (1 - depthFactor * 0.75));
+            .lerp(new THREE.Color(0xffd9a8), 0.28 * (1 - depthFactor * 0.8));
         dir.color.lerp(sunTint, Math.min(1, dt * 1.4));
-        dir.intensity += ((0.12 + region.lightIntensity * 0.78) - dir.intensity) * Math.min(1, dt * 1.4);
-        ambient.intensity += ((0.10 + depthFactor * 0.08) - ambient.intensity) * Math.min(1, dt * 1.4);
+        dir.intensity += ((0.18 + region.lightIntensity * 0.90 * extinction) - dir.intensity) * Math.min(1, dt * 1.4);
+        ambient.intensity += ((0.08 + 0.05 * extinction + depthFactor * 0.12) - ambient.intensity) * Math.min(1, dt * 1.4);
         ambient.color.lerp(new THREE.Color(0x0b2231).lerp(accent, 0.16), Math.min(1, dt * 1.2));
         if (rim) {
             rim.color.lerp(accent, Math.min(1, dt * 1.4));
-            rim.intensity += ((0.12 + region.lightIntensity * 0.28) - rim.intensity) * Math.min(1, dt * 1.4);
+            rim.intensity += ((0.06 + region.lightIntensity * 0.22 * extinction) - rim.intensity) * Math.min(1, dt * 1.4);
         }
 
         // Le projecteur reste un cône de survie lisible ; la lumière d'accent
         // révèle la flore et les reliefs sans uniformiser la scène.
         if (headlamp) {
-            headlamp.intensity = 0.62 + depthFactor * 1.05;
-            headlamp.distance = 42 + depthFactor * 18;
+            headlamp.intensity = 1.15 + depthFactor * 1.35;
+            headlamp.distance = 52 + depthFactor * 26;
         }
         if (accentLight) {
             accentLight.color.lerp(accent, Math.min(1, dt * 1.6));
@@ -2185,13 +2264,25 @@ PP.Game = (function () {
             accentLight.position.y += 6;
         }
         if (renderer) {
-            const targetExposure = 1.02 + depthFactor * 0.14;
+            // Le menu profite d'un léger surcroît d'exposition : la scène
+            // d'accueil doit rester lisible derrière le panneau, pas noire.
+            const menuBoost = state.isPlaying ? 0 : 0.20;
+            const targetExposure = 1.10 + depthFactor * 0.12 + menuBoost;
             renderer.toneMappingExposure += (targetExposure - renderer.toneMappingExposure) * Math.min(1, dt * 1.2);
         }
         if (bloomPass) {
-            const baseBloom = state.settings.quality === 'ultra' ? 0.26 : 0.21;
-            bloomPass.strength = baseBloom + depthFactor * 0.16;
-            bloomPass.threshold = 0.79 - depthFactor * 0.04;
+            const baseBloom = state.settings.quality === 'ultra' ? 0.24 : 0.19;
+            bloomPass.strength = baseBloom + depthFactor * 0.14;
+            bloomPass.threshold = 0.82 - depthFactor * 0.05;
+        }
+        if (gradePass) {
+            const hullRatio = U.clamp((state.hull || 0) / 100, 0, 1);
+            const damage = 1 - hullRatio;
+            gradePass.uniforms.uTime.value = elapsed;
+            gradePass.uniforms.uDamage.value = damage;
+            gradePass.uniforms.uAberration.value = 0.0009 + damage * 0.0034;
+            gradePass.uniforms.uVignette.value = 0.14 + damage * 0.20;
+            gradePass.uniforms.uGrain.value = 0.021 + depthFactor * 0.012;
         }
 
         if (state.settings.quality !== 'low') {

@@ -78,6 +78,40 @@ PP.Factory = (function () {
         /* ------------------------------------------------------------------ */
         /* ARCHITECTURE DES MODULES                                            */
         /* ------------------------------------------------------------------ */
+        /* Ombre de contact : une tache radiale douce qui ancre le module au
+           sol, même hors du champ de la carte d'ombre directionnelle. */
+        let contactTex = null;
+        function contactShadowTexture() {
+            if (contactTex) return contactTex;
+            const c = document.createElement('canvas');
+            c.width = c.height = 128;
+            const ctx = c.getContext('2d');
+            const grad = ctx.createRadialGradient(64, 64, 3, 64, 64, 62);
+            grad.addColorStop(0, 'rgba(0,0,0,0.88)');
+            grad.addColorStop(0.52, 'rgba(0,0,0,0.46)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 128, 128);
+            contactTex = new THREE.CanvasTexture(c);
+            return contactTex;
+        }
+
+        function addContactShadow(group, footprint) {
+            const shadow = new THREE.Mesh(
+                new THREE.PlaneGeometry(1, 1),
+                new THREE.MeshBasicMaterial({
+                    map: contactShadowTexture(), transparent: true, opacity: 0.66,
+                    depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2
+                })
+            );
+            shadow.userData.noPick = true;
+            shadow.rotation.x = -Math.PI / 2;
+            shadow.position.y = 0.08;
+            shadow.scale.set(footprint, footprint, 1);
+            shadow.renderOrder = 1;
+            group.add(shadow);
+        }
+
         function createMesh(type) {
             const g = new THREE.Group();
             const steel = MATS.steel();
@@ -292,7 +326,10 @@ PP.Factory = (function () {
                 addLamp(g, 0xc084fc, 3.0, 42, 5.4);
             }
 
-            g.traverse(c => { if (c.isMesh) c.userData.buildingType = type; });
+            g.traverse(c => { if (c.isMesh && !c.userData.noPick) c.userData.buildingType = type; });
+            // Empreinte au sol proportionnée au module.
+            const footprints = { hub: 30, habitat: 16, drill: 17, smelter: 17, geothermal: 21, conveyor: 8, scanner: 15, drone: 12, defense: 16 };
+            addContactShadow(g, footprints[type] || 16);
             return g;
         }
 
@@ -473,7 +510,7 @@ PP.Factory = (function () {
             if (placement.node) placement.node.occupied = true;
             if (placement.vent) placement.vent.occupied = true;
 
-            mesh.traverse(c => { if (c.isMesh) c.userData.entity = building; });
+            mesh.traverse(c => { if (c.isMesh && !c.userData.noPick) c.userData.entity = building; });
             state.buildings.push(building);
             api.interactables.push(mesh);
             state.stats.buildCount = (state.stats.buildCount || 0) + 1;
@@ -1108,7 +1145,7 @@ PP.Factory = (function () {
                 };
                 if (linkedNodeId !== null) world.nodes[linkedNodeId].occupied = true;
                 if (linkedVentId !== null) world.vents[linkedVentId].occupied = true;
-                mesh.traverse(c => { if (c.isMesh) c.userData.entity = b; });
+                mesh.traverse(c => { if (c.isMesh && !c.userData.noPick) c.userData.entity = b; });
                 applyLevelVisual(b);
                 state.buildings.push(b);
                 api.interactables.push(mesh);
